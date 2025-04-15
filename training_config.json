@@ -1,0 +1,10 @@
+{
+    "model_name": "microsoft/deberta-v3-base",
+    "batch_size": 32,
+    "learning_rate": 2e-05,
+    "num_epochs": 5,
+    "max_len": 256,
+    "gamma": 2.0,
+    "temperature": 0.07,
+    "timestamp": "2025-04-13 17:30:24"
+}

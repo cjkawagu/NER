@@ -21,7 +21,6 @@ from nltk.corpus import wordnet
 import logging
 import json
 from datetime import datetime
-import gc
 
 # Download required NLTK data
 nltk.download('wordnet')
@@ -40,14 +39,31 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 MODEL_NAME = "microsoft/deberta-v3-base"
-BATCH_SIZE = 32
-MAX_LEN = 256
+BATCH_SIZE = 4  # Further reduced from 8 to speed up training
+MAX_LEN = 64   # Keep at 64 for now
 LEARNING_RATE = 2e-5
-NUM_EPOCHS = 5
+NUM_EPOCHS = 3
 WARMUP_RATIO = 0.1
-NUM_SPANS = 3  # Number of candidate spans per entity
-GAMMA = 2.0    # Focal Loss parameter
-TEMPERATURE = 0.07  # Contrastive learning temperature
+NUM_SPANS = 3
+GAMMA = 2.0
+TEMPERATURE = 0.07
+
+# Add memory optimization settings
+GRADIENT_CHECKPOINTING = True
+MIXED_PRECISION = True
+GRADIENT_CLIP = 1.0
+
+# Force GPU usage if available
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    logger.info("Using Apple MPS (Metal Performance Shaders)")
+elif torch.cuda.is_available():
+    device = torch.device("cuda")
+    torch.cuda.empty_cache()
+    logger.info(f"Using NVIDIA GPU: {torch.cuda.get_device_name(0)}")
+else:
+    device = torch.device("cpu")
+    logger.warning("No GPU available, using CPU. Training will be very slow!")
 
 # Save configuration
 config = {
@@ -58,6 +74,9 @@ config = {
     "max_len": MAX_LEN,
     "gamma": GAMMA,
     "temperature": TEMPERATURE,
+    "gradient_checkpointing": GRADIENT_CHECKPOINTING,
+    "mixed_precision": MIXED_PRECISION,
+    "gradient_clip": GRADIENT_CLIP,
     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 }
 
@@ -147,20 +166,23 @@ def encode_with_spans(batch):
         # Generate candidate spans
         span_labels = []
         for i, (tags, offsets) in enumerate(zip(batch["ner_tags"], encoded["offset_mapping"])):
-            # Initialize span mask with correct dimensions
-            span_mask = np.zeros((MAX_LEN, MAX_LEN), dtype=np.float32)
+            # Initialize span mask with correct dimensions - using attention mask length
+            attention_mask_length = len(encoded["attention_mask"][i])
+            span_mask = np.zeros((attention_mask_length, attention_mask_length), dtype=np.float32)
             word_ids = [x if x is not None else -1 for x in encoded.word_ids(i)]
             
             # Find entity spans
             current_entity = None
             for j, (word_idx, tag) in enumerate(zip(word_ids, tags)):
-                if word_idx == -1:
+                if word_idx == -1 or j >= attention_mask_length:
                     continue
                 tag_str = label_list[tag]
                 if tag_str.startswith("B-"):
                     if current_entity is not None:
                         # Mark the previous entity span
-                        span_mask[current_entity[0], current_entity[1]] = 1
+                        start, end = current_entity
+                        if start < attention_mask_length and end < attention_mask_length:
+                            span_mask[start, end] = 1
                     current_entity = (j, j)
                 elif tag_str.startswith("I-") and current_entity:
                     if tag_str.split("-")[1] == label_list[tags[current_entity[0]]].split("-")[1]:
@@ -168,29 +190,23 @@ def encode_with_spans(batch):
                 else:
                     if current_entity is not None:
                         # Mark the current entity span
-                        span_mask[current_entity[0], current_entity[1]] = 1
+                        start, end = current_entity
+                        if start < attention_mask_length and end < attention_mask_length:
+                            span_mask[start, end] = 1
                         current_entity = None
             
             # Mark the last entity if exists
             if current_entity is not None:
-                span_mask[current_entity[0], current_entity[1]] = 1
+                start, end = current_entity
+                if start < attention_mask_length and end < attention_mask_length:
+                    span_mask[start, end] = 1
             
-            # Calculate total number of possible spans
-            total_spans = MAX_LEN * (MAX_LEN + 1) // 2
-            
-            # Flatten the span mask and ensure it matches the expected size
-            flattened_mask = span_mask.flatten()
-            if len(flattened_mask) < total_spans:
-                # Pad with zeros if needed
-                flattened_mask = np.pad(flattened_mask, (0, total_spans - len(flattened_mask)))
-            elif len(flattened_mask) > total_spans:
-                # Truncate if needed
-                flattened_mask = flattened_mask[:total_spans]
-            
-            span_labels.append(flattened_mask)
+            # Flatten the span mask to match the model's output
+            span_labels.append(span_mask.flatten())
         
-        # Convert to numpy array for better memory management
-        span_labels = np.array(span_labels, dtype=np.float32)
+        # Add explicit garbage collection
+        import gc
+        gc.collect()
         
         return {
             "input_ids": encoded["input_ids"],
@@ -204,24 +220,20 @@ def encode_with_spans(batch):
 # Dataset preparation
 logger.info("Encoding dataset with spans...")
 try:
-    # First, remove any existing columns that might cause conflicts
-    columns_to_remove = [col for col in dataset["train"].column_names if col not in ["tokens", "ner_tags"]]
-    if columns_to_remove:
-        dataset = dataset.remove_columns(columns_to_remove)
-    
-    # Apply span encoding with proper resource management
+    # Process dataset with proper resource management
     dataset = dataset.map(
         encode_with_spans,
         batched=True,
-        batch_size=1000,
-        num_proc=1  # Reduce to single process to avoid semaphore issues
+        batch_size=1000,  # Reduced batch size for memory efficiency
+        num_proc=1  # Limit to single process to avoid semaphore issues
     )
     logger.info("Dataset encoding completed successfully")
 except Exception as e:
     logger.error(f"Error in dataset encoding: {str(e)}")
     raise
 finally:
-    # Force garbage collection
+    # Clean up any resources
+    import gc
     gc.collect()
 
 # Convert dataset to PyTorch tensors
@@ -231,29 +243,41 @@ def convert_to_tensors(example):
         input_ids = torch.tensor(example["input_ids"], dtype=torch.long)
         attention_mask = torch.tensor(example["attention_mask"], dtype=torch.long)
         
+        # Get the attention mask length for proper span label sizing
+        attention_length = attention_mask.shape[-1]
+        total_spans = attention_length * (attention_length + 1) // 2
+        
         # Handle span_labels conversion
         span_labels = example["span_labels"]
         
         # Convert span_labels to numpy array if it's a list
         if isinstance(span_labels, list):
-            span_labels = np.array(span_labels, dtype=np.float32)
+            try:
+                # Convert to numpy array with proper shape
+                span_labels = np.array(span_labels, dtype=np.float32)
+                
+                # Ensure 2D shape [batch_size, total_spans]
+                if len(span_labels.shape) == 1:
+                    span_labels = span_labels.reshape(1, -1)
+                
+                # Pad or truncate to match total_spans
+                current_spans = span_labels.shape[1]
+                if current_spans < total_spans:
+                    padding = np.zeros((span_labels.shape[0], total_spans - current_spans), dtype=np.float32)
+                    span_labels = np.concatenate([span_labels, padding], axis=1)
+                elif current_spans > total_spans:
+                    span_labels = span_labels[:, :total_spans]
+                
+            except Exception as e:
+                logger.error(f"Error processing span_labels: {str(e)}")
+                raise
         
         # Convert to tensor
         span_labels = torch.tensor(span_labels, dtype=torch.float32)
         
-        # Calculate expected number of spans
-        total_spans = MAX_LEN * (MAX_LEN + 1) // 2
-        
-        # Ensure correct shape
-        if len(span_labels.shape) == 1:
-            span_labels = span_labels.unsqueeze(0)
-        elif len(span_labels.shape) == 2:
-            if span_labels.shape[1] != total_spans:
-                if span_labels.shape[1] < total_spans:
-                    padding = torch.zeros((span_labels.shape[0], total_spans - span_labels.shape[1]), dtype=torch.float32)
-                    span_labels = torch.cat([span_labels, padding], dim=1)
-                else:
-                    span_labels = span_labels[:, :total_spans]
+        # Clean up intermediate objects
+        import gc
+        gc.collect()
         
         return {
             "input_ids": input_ids,
@@ -266,12 +290,17 @@ def convert_to_tensors(example):
 
 logger.info("Converting dataset to PyTorch tensors...")
 try:
-    # Convert to tensors with proper resource management
+    # First, remove any existing columns that might cause conflicts
+    columns_to_remove = [col for col in dataset["train"].column_names if col not in ["input_ids", "attention_mask", "span_labels"]]
+    if columns_to_remove:
+        dataset = dataset.remove_columns(columns_to_remove)
+    
+    # Then convert to tensors with proper resource management
     dataset = dataset.map(
         convert_to_tensors,
         batched=True,
-        batch_size=32,
-        num_proc=1,  # Reduce to single process to avoid semaphore issues
+        batch_size=32,  # Match the training batch size
+        num_proc=1,  # Limit to single process
         remove_columns=dataset["train"].column_names
     )
     logger.info("Dataset conversion completed successfully")
@@ -279,8 +308,10 @@ except Exception as e:
     logger.error(f"Failed to convert dataset: {str(e)}")
     raise
 finally:
-    # Force garbage collection
+    # Clean up resources
+    import gc
     gc.collect()
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
 # Set dataset format
 dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "span_labels"])
@@ -288,35 +319,41 @@ dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "span_l
 # Verify dataset format
 logger.info("Verifying dataset format...")
 try:
-    # Get a sample from each split
-    train_sample = dataset["train"][0]
-    val_sample = dataset["validation"][0]
-    test_sample = dataset["test"][0]
+    sample = dataset["train"][0]
+    attention_length = sample['attention_mask'].shape[-1]
+    expected_spans = attention_length * (attention_length + 1) // 2
     
-    # Log shapes
-    logger.info("Training sample shapes:")
-    logger.info(f"input_ids: {train_sample['input_ids'].shape}")
-    logger.info(f"attention_mask: {train_sample['attention_mask'].shape}")
-    logger.info(f"span_labels: {train_sample['span_labels'].shape}")
+    logger.info(f"Sample shapes:")
+    logger.info(f"Input IDs: {sample['input_ids'].shape}")
+    logger.info(f"Attention Mask: {sample['attention_mask'].shape}")
+    logger.info(f"Span Labels: {sample['span_labels'].shape}")
+    logger.info(f"Expected number of spans: {expected_spans}")
     
-    # Verify shapes are consistent
-    assert train_sample['input_ids'].shape == (MAX_LEN,), f"Expected input_ids shape {(MAX_LEN,)}, got {train_sample['input_ids'].shape}"
-    assert train_sample['attention_mask'].shape == (MAX_LEN,), f"Expected attention_mask shape {(MAX_LEN,)}, got {train_sample['attention_mask'].shape}"
-    total_spans = MAX_LEN * (MAX_LEN + 1) // 2
-    assert train_sample['span_labels'].shape == (total_spans,), f"Expected span_labels shape {(total_spans,)}, got {train_sample['span_labels'].shape}"
+    if sample['span_labels'].shape[-1] != expected_spans:
+        logger.error(f"Size mismatch! Span labels shape {sample['span_labels'].shape} does not match expected {expected_spans}")
+        raise ValueError("Span labels size mismatch")
     
-    logger.info("Dataset format verification successful")
+    # Verify batch processing
+    batch = next(iter(dataset["train"].iter(BATCH_SIZE)))
+    logger.info(f"\nBatch shapes:")
+    logger.info(f"Input IDs: {batch['input_ids'].shape}")
+    logger.info(f"Attention Mask: {batch['attention_mask'].shape}")
+    logger.info(f"Span Labels: {batch['span_labels'].shape}")
+    
 except Exception as e:
     logger.error(f"Error verifying dataset format: {str(e)}")
     raise
 finally:
-    # Force garbage collection
+    # Clean up resources
+    import gc
     gc.collect()
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
 # Contrastive NER Model (Cheng et al., 2023)
 class SpanNER(nn.Module):
     def __init__(self):
         super().__init__()
+        logger.info("Initializing SpanNER model...")
         config = AutoConfig.from_pretrained(MODEL_NAME)
         self.deberta = DebertaV2Model.from_pretrained(MODEL_NAME)
         self.deberta.resize_token_embeddings(len(tokenizer))
@@ -334,12 +371,14 @@ class SpanNER(nn.Module):
         
         # Width embedding
         self.width_embedding = nn.Embedding(NUM_SPANS, config.hidden_size)
+        logger.info("SpanNER model initialized successfully")
         
     def forward(self, input_ids, attention_mask):
         try:
             # Get device from model parameters
             device = next(self.parameters()).device
             
+            # Get DeBERTa outputs
             outputs = self.deberta(input_ids, attention_mask)
             sequence_output = outputs.last_hidden_state
             
@@ -368,17 +407,7 @@ class SpanNER(nn.Module):
             
             # Process spans
             span_vectors = self.span_rep(span_vectors)
-            logits = self.classifier(span_vectors).squeeze(-1)  # Shape: [batch_size, total_spans]
-            
-            # Ensure logits shape matches expected span labels shape
-            if logits.shape[1] != total_spans:
-                logger.warning(f"Logits shape {logits.shape} doesn't match expected total_spans {total_spans}")
-                # Pad or truncate logits to match expected shape
-                if logits.shape[1] < total_spans:
-                    padding = torch.zeros((batch_size, total_spans - logits.shape[1]), device=device)
-                    logits = torch.cat([logits, padding], dim=1)
-                else:
-                    logits = logits[:, :total_spans]
+            logits = self.classifier(span_vectors).squeeze(-1)
             
             # Contrastive projections
             projections = self.projection(span_vectors)
@@ -386,8 +415,7 @@ class SpanNER(nn.Module):
             return logits, projections
             
         except Exception as e:
-            logger.error(f"Error in SpanNER forward pass: {str(e)}")
-            logger.error(f"Input shapes - input_ids: {input_ids.shape}, attention_mask: {attention_mask.shape}")
+            logger.error(f"Error in forward pass: {str(e)}")
             raise
 
 # Focal Loss implementation (Lin et al., 2020)
@@ -449,108 +477,179 @@ class ContrastiveLoss(nn.Module):
         return F.cross_entropy(logits, labels)
 
 # Training setup
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = SpanNER().to(device)
-optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
-total_steps = len(dataset["train"]) // BATCH_SIZE * NUM_EPOCHS
-scheduler = get_linear_schedule_with_warmup(
-    optimizer, 
-    num_warmup_steps=int(total_steps * WARMUP_RATIO),
-    num_training_steps=total_steps
-)
-focal_loss = FocalLoss()
-contrastive_loss = ContrastiveLoss()
-
-# Initialize best F1 score
-best_f1 = 0.0
+try:
+    # Initialize model with memory optimization
+    logger.info("Initializing model...")
+    model = SpanNER().to(device)
+    
+    # Enable gradient checkpointing if available
+    if GRADIENT_CHECKPOINTING and hasattr(model, 'gradient_checkpointing_enable'):
+        model.gradient_checkpointing_enable()
+        logger.info("Gradient checkpointing enabled")
+    
+    # Initialize mixed precision training (only for CUDA)
+    scaler = torch.cuda.amp.GradScaler() if MIXED_PRECISION and torch.cuda.is_available() else None
+    if scaler is not None:
+        logger.info("Mixed precision training enabled")
+    
+    # Initialize optimizer with memory-efficient settings
+    logger.info("Initializing optimizer...")
+    optimizer = AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
+    
+    # Calculate total steps with memory consideration
+    total_steps = len(dataset["train"]) // BATCH_SIZE * NUM_EPOCHS
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, 
+        num_warmup_steps=int(total_steps * WARMUP_RATIO),
+        num_training_steps=total_steps
+    )
+    
+    # Initialize losses
+    logger.info("Initializing loss functions...")
+    focal_loss = FocalLoss()
+    contrastive_loss = ContrastiveLoss()
+    
+    # Initialize metrics tracking
+    best_f1 = 0.0
+    metrics_history = {
+        'train_loss': [],
+        'val_f1': [],
+        'precision': [],
+        'recall': [],
+        'training_time': []
+    }
+    
+    # Pre-allocate memory for first batch
+    logger.info("Pre-allocating memory for first batch...")
+    try:
+        first_batch = next(iter(dataset["train"].iter(BATCH_SIZE)))
+        logger.info("Successfully loaded first batch")
+    except Exception as e:
+        logger.error(f"Failed to load first batch: {str(e)}")
+        raise
+    
+    # Clean up any unused memory
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        logger.info(f"Memory after cleanup: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+    
+except Exception as e:
+    logger.error(f"Error during training setup: {str(e)}")
+    if torch.cuda.is_available():
+        logger.error(f"GPU Memory at error: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+    raise
 
 # Training loop
 for epoch in range(NUM_EPOCHS):
-    model.train()
-    total_loss = 0
-    total_focal_loss = 0
-    total_contrastive_loss = 0
-    
-    # Get the dataset format
-    train_dataset = dataset["train"]
-    
-    # Create a DataLoader with proper resource management
-    from torch.utils.data import DataLoader
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=0  # Set to 0 to avoid multiprocessing issues
-    )
-    
-    for batch in tqdm(train_loader):
-        try:
-            # Access batch elements
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            span_labels = batch["span_labels"].to(device)
+    try:
+        model.train()
+        total_loss = 0
+        total_focal_loss = 0
+        total_contrastive_loss = 0
+        epoch_start_time = datetime.now()
+        
+        # Get the dataset format
+        train_dataset = dataset["train"]
+        
+        # Initialize progress bar with minimal output
+        pbar = tqdm(
+            train_dataset.iter(BATCH_SIZE), 
+            total=len(train_dataset) // BATCH_SIZE,
+            desc=f"Epoch {epoch + 1}/{NUM_EPOCHS}",
+            leave=True  # Keep the progress bar after completion
+        )
+        
+        for batch in pbar:
+            # Initialize variables to None
+            input_ids = attention_mask = span_labels = logits = projections = loss = focal_l = contrastive_l = None
             
-            # Log shapes for debugging
-            logger.debug(f"Input shapes - input_ids: {input_ids.shape}, attention_mask: {attention_mask.shape}, span_labels: {span_labels.shape}")
-            
-            optimizer.zero_grad()
-            logits, projections = model(input_ids, attention_mask)
-            
-            # Log output shapes for debugging
-            logger.debug(f"Output shapes - logits: {logits.shape}, projections: {projections.shape}")
-            
-            # Ensure shapes match before calculating loss
-            if logits.shape != span_labels.shape:
-                logger.warning(f"Shape mismatch - logits: {logits.shape}, span_labels: {span_labels.shape}")
-                # Reshape span_labels to match logits if possible
-                if span_labels.shape[0] == logits.shape[0]:  # Same batch size
-                    if span_labels.shape[1] < logits.shape[1]:
-                        padding = torch.zeros((span_labels.shape[0], logits.shape[1] - span_labels.shape[1]), device=device)
-                        span_labels = torch.cat([span_labels, padding], dim=1)
-                    else:
-                        span_labels = span_labels[:, :logits.shape[1]]
-                else:
-                    raise ValueError(f"Cannot reshape span_labels to match logits shape")
-            
-            # Calculate losses
-            focal_l = focal_loss(logits, span_labels)
-            contrastive_l = contrastive_loss(projections)
-            
-            # Combined loss
-            loss = focal_l + 0.1 * contrastive_l
-            
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            
-            total_loss += loss.item()
-            total_focal_loss += focal_l.item()
-            total_contrastive_loss += contrastive_l.item()
-            
-            # Clear memory
-            del input_ids, attention_mask, span_labels, logits, projections, loss
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            
-        except Exception as e:
-            logger.error(f"Error in training batch: {str(e)}")
-            continue
-        finally:
-            # Force garbage collection after each batch
-            gc.collect()
-    
-    # Log epoch metrics
-    avg_loss = total_loss / len(train_loader)
-    avg_focal_loss = total_focal_loss / len(train_loader)
-    avg_contrastive_loss = total_contrastive_loss / len(train_loader)
-    
-    logger.info(f"Epoch {epoch + 1}/{NUM_EPOCHS}")
-    logger.info(f"Average Loss: {avg_loss:.4f}")
-    logger.info(f"Average Focal Loss: {avg_focal_loss:.4f}")
-    logger.info(f"Average Contrastive Loss: {avg_contrastive_loss:.4f}")
-    
-    # Force garbage collection after each epoch
-    gc.collect()
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            try:
+                # Move data to device
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                span_labels = batch["span_labels"].to(device)
+                
+                # Clear gradients
+                optimizer.zero_grad()
+                
+                # Forward pass
+                if scaler is not None:  # CUDA mixed precision
+                    with torch.cuda.amp.autocast():
+                        logits, projections = model(input_ids, attention_mask)
+                        focal_l = focal_loss(logits, span_labels)
+                        contrastive_l = contrastive_loss(projections)
+                        loss = focal_l + 0.1 * contrastive_l
+                    
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:  # MPS or CPU
+                    logits, projections = model(input_ids, attention_mask)
+                    focal_l = focal_loss(logits, span_labels)
+                    contrastive_l = contrastive_loss(projections)
+                    loss = focal_l + 0.1 * contrastive_l
+                    
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP)
+                    optimizer.step()
+                
+                scheduler.step()
+                
+                # Update metrics
+                total_loss += loss.item()
+                total_focal_loss += focal_l.item()
+                total_contrastive_loss += contrastive_l.item()
+                
+                # Update progress bar without printing new lines
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'device': 'MPS' if torch.backends.mps.is_available() else 'CUDA' if torch.cuda.is_available() else 'CPU'
+                }, refresh=False)
+                
+            except Exception as e:
+                logger.error(f"Error in training batch: {str(e)}")
+                continue
+            finally:
+                # Clean up batch resources
+                for var in [input_ids, attention_mask, span_labels, logits, projections, loss, focal_l, contrastive_l]:
+                    if var is not None:
+                        del var
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+                elif torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        
+        # Calculate average losses and training time
+        avg_loss = total_loss / len(train_dataset)
+        avg_focal_loss = total_focal_loss / len(train_dataset)
+        avg_contrastive_loss = total_contrastive_loss / len(train_dataset)
+        epoch_time = (datetime.now() - epoch_start_time).total_seconds()
+        
+        metrics_history['train_loss'].append(avg_loss)
+        metrics_history['training_time'].append(epoch_time)
+        
+        # Print epoch summary once
+        print(f"\nEpoch {epoch+1} Summary:")
+        print(f"Average Loss: {avg_loss:.4f}")
+        print(f"Average Focal Loss: {avg_focal_loss:.4f}")
+        print(f"Average Contrastive Loss: {avg_contrastive_loss:.4f}")
+        print(f"Epoch Time: {epoch_time:.2f} seconds")
+        
+    except Exception as e:
+        logger.error(f"Error in epoch {epoch}: {str(e)}")
+        raise
+    finally:
+        # Clean up epoch resources
+        import gc
+        gc.collect()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     # Evaluation
     model.eval()

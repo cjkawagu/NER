@@ -1,0 +1,17 @@
+2025-04-15 16:53:40,867 - INFO - Using Apple MPS (Metal Performance Shaders)
+2025-04-15 16:53:40,868 - INFO - Starting training with configuration:
+2025-04-15 16:53:40,868 - INFO - {
+    "model_name": "dslim/bert-base-NER",
+    "batch_size": 16,
+    "learning_rate": 2e-05,
+    "num_epochs": 3,
+    "max_len": 128,
+    "timestamp": "2025-04-15 16:53:40"
+}
+2025-04-15 16:53:40,868 - INFO - Loading CoNLL-2003 dataset...
+2025-04-15 16:53:44,283 - INFO - Initializing tokenizer and model...
+2025-04-15 16:53:45,257 - INFO - Tokenizing dataset...
+2025-04-15 16:53:45,282 - INFO - Starting training...
+2025-04-15 17:17:41,850 - INFO - Evaluating model...
+2025-04-15 17:18:08,674 - INFO - Evaluation results: {'eval_loss': 0.05079542100429535, 'eval_f1': 0.9910855100512427, 'eval_report': '              precision    recall  f1-score   support\n\n           O       0.97      0.97      0.97      1837\n       B-PER       0.92      0.93      0.92       922\n       I-PER       0.93      0.94      0.94      1341\n       B-ORG       0.98      0.97      0.97      1836\n       I-ORG       0.94      0.93      0.94       257\n       B-LOC       0.89      0.89      0.89       346\n       I-LOC       0.94      0.95      0.95       751\n      B-MISC       0.99      0.99      0.99      1300\n      I-MISC       1.00      1.00      1.00     42733\n\n    accuracy                           0.99     51323\n   macro avg       0.95      0.95      0.95     51323\nweighted avg       0.99      0.99      0.99     51323\n', 'eval_runtime': 26.8213, 'eval_samples_per_second': 121.172, 'eval_steps_per_second': 7.606, 'epoch': 3.0}
+2025-04-15 17:18:09,852 - INFO - Example inference results: [{'entity_group': 'ORG', 'score': 0.99981576, 'word': 'Apple', 'start': 0, 'end': 5}, {'entity_group': 'LOC', 'score': 0.9989791, 'word': 'U. K.', 'start': 27, 'end': 31}]
