@@ -1,6 +1,6 @@
 # Named Entity Recognition (NER) with Span-Based Models
 
-This repository provides an advanced framework for training, evaluating, and deploying Named Entity Recognition (NER) models using span-based approaches. Leveraging state-of-the-art transformer encoders such as DeBERTa, BERT, RoBERTa, and ELECTRA, the project focuses on efficient span encoding, classification, and contrastive learning to improve NER performance. The program yielded an F1 score of ~0.73 at most recent testing.
+Created for AIST 3120 Introduction to Natural Language Processing at the Chinese University of Hong Kong, this repository provides an advanced framework for training, evaluating, and deploying Named Entity Recognition (NER) models using span-based approaches. Leveraging state-of-the-art transformer encoders such as DeBERTa, BERT, RoBERTa, and ELECTRA, the project focuses on efficient span encoding, classification, and contrastive learning to improve NER performance. The program yielded an F1 score of ~0.73 at the most recent testing.
 
 ---
 
