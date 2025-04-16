@@ -39,8 +39,8 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 MODEL_NAME = "microsoft/deberta-v3-base"
-BATCH_SIZE = 4  # Further reduced from 8 to speed up training
-MAX_LEN = 64  # Keep at 64 for now
+BATCH_SIZE = 4 
+MAX_LEN = 64
 LEARNING_RATE = 2e-5
 NUM_EPOCHS = 3
 WARMUP_RATIO = 0.1
@@ -48,7 +48,7 @@ NUM_SPANS = 3
 GAMMA = 2.0
 TEMPERATURE = 0.07
 
-# Add memory optimization settings
+# Memory optimization settings
 GRADIENT_CHECKPOINTING = True
 MIXED_PRECISION = True
 GRADIENT_CLIP = 1.0
@@ -154,7 +154,7 @@ def augment_entities(example):
 logger.info("Applying data augmentation...")
 dataset = dataset.map(augment_entities, num_proc=4)
 
-# Span-based encoding (Li et al., 2022) - OPTIMIZED VERSION
+# Span-based encoding (Li et al., 2022)
 def encode_with_spans(batch):
     try:
         # Tokenize the input
@@ -365,7 +365,7 @@ finally:
     gc.collect()
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-# Contrastive NER Model (Cheng et al., 2023) - OPTIMIZED VERSION
+# Contrastive NER Model (Cheng et al., 2023)
 class SpanNER(nn.Module):
     def __init__(self):
         super().__init__()
@@ -727,7 +727,7 @@ else:
     logger.warning("No best model found, using final model parameters")
 
 
-# Final evaluation (updated)
+# Final evaluation
 checkpoint = torch.load('best_model.pt')
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
@@ -749,7 +749,7 @@ with torch.no_grad():
             preds.extend(batch_preds[i][valid_spans].flatten())
             true_labels.extend(span_labels[i][valid_spans].flatten())
 
-# CORRECTED: Final classification report with binary labels
+# Final classification report with binary labels
 logger.info("\nDetailed Classification Report:")
 logger.info(classification_report(
     true_labels,
