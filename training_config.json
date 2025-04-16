@@ -1,10 +1,15 @@
 {
     "model_name": "microsoft/deberta-v3-base",
-    "batch_size": 32,
+    "batch_size": 4,
+    "effective_batch_size": 16,
+    "gradient_accumulation_steps": 4,
     "learning_rate": 2e-05,
-    "num_epochs": 5,
-    "max_len": 256,
+    "num_epochs": 3,
+    "max_len": 64,
     "gamma": 2.0,
     "temperature": 0.07,
-    "timestamp": "2025-04-13 17:30:24"
+    "gradient_checkpointing": true,
+    "mixed_precision": true,
+    "gradient_clip": 1.0,
+    "timestamp": "2025-04-16 02:29:35"
 }

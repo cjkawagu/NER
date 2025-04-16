@@ -1,0 +1,74 @@
+2025-04-16 02:29:35,672 - INFO - Using Apple MPS (Metal Performance Shaders)
+2025-04-16 02:29:35,672 - INFO - Starting training with configuration:
+2025-04-16 02:29:35,672 - INFO - {
+    "model_name": "microsoft/deberta-v3-base",
+    "batch_size": 4,
+    "effective_batch_size": 16,
+    "gradient_accumulation_steps": 4,
+    "learning_rate": 2e-05,
+    "num_epochs": 3,
+    "max_len": 64,
+    "gamma": 2.0,
+    "temperature": 0.07,
+    "gradient_checkpointing": true,
+    "mixed_precision": true,
+    "gradient_clip": 1.0,
+    "timestamp": "2025-04-16 02:29:35"
+}
+2025-04-16 02:29:35,672 - INFO - Loading CoNLL-2003 dataset...
+2025-04-16 02:29:39,404 - INFO - Dataset loaded successfully. Processing labels...
+2025-04-16 02:29:41,038 - INFO - Applying data augmentation...
+2025-04-16 02:29:42,250 - INFO - Encoding dataset with spans...
+2025-04-16 02:29:47,818 - INFO - Dataset encoding completed successfully
+2025-04-16 02:29:47,893 - INFO - Converting dataset to PyTorch tensors...
+2025-04-16 02:30:37,391 - INFO - Dataset conversion completed successfully
+2025-04-16 02:30:37,464 - INFO - Verifying dataset format...
+2025-04-16 02:30:37,467 - INFO - Sample shapes:
+2025-04-16 02:30:37,467 - INFO - Input IDs: torch.Size([64])
+2025-04-16 02:30:37,467 - INFO - Attention Mask: torch.Size([64])
+2025-04-16 02:30:37,467 - INFO - Span Labels: torch.Size([189])
+2025-04-16 02:30:37,468 - INFO - 
+Batch shapes:
+2025-04-16 02:30:37,468 - INFO - Input IDs: torch.Size([4, 64])
+2025-04-16 02:30:37,468 - INFO - Attention Mask: torch.Size([4, 64])
+2025-04-16 02:30:37,468 - INFO - Span Labels: torch.Size([4, 189])
+2025-04-16 02:30:37,541 - INFO - Initializing model...
+2025-04-16 02:30:37,541 - INFO - Initializing SpanNER model...
+2025-04-16 02:30:39,875 - INFO - SpanNER model initialized successfully
+2025-04-16 02:30:40,029 - INFO - Initializing optimizer...
+2025-04-16 02:30:40,030 - INFO - Initializing loss functions...
+2025-04-16 02:30:40,030 - INFO - Pre-allocating memory for first batch...
+2025-04-16 02:30:40,030 - INFO - Successfully loaded first batch
+2025-04-16 02:54:42,205 - INFO - 
+Classification Report:
+2025-04-16 02:54:42,565 - INFO -               precision    recall  f1-score   support
+
+  non-entity       1.00      1.00      1.00    609781
+      entity       0.72      0.33      0.45      4469
+
+    accuracy                           0.99    614250
+   macro avg       0.86      0.66      0.72    614250
+weighted avg       0.99      0.99      0.99    614250
+
+2025-04-16 03:17:57,157 - INFO - 
+Classification Report:
+2025-04-16 03:17:57,510 - INFO -               precision    recall  f1-score   support
+
+  non-entity       1.00      1.00      1.00    609781
+      entity       0.72      0.33      0.45      4469
+
+    accuracy                           0.99    614250
+   macro avg       0.86      0.66      0.72    614250
+weighted avg       0.99      0.99      0.99    614250
+
+2025-04-16 03:41:13,190 - INFO - 
+Classification Report:
+2025-04-16 03:41:13,537 - INFO -               precision    recall  f1-score   support
+
+  non-entity       1.00      1.00      1.00    609781
+      entity       0.72      0.33      0.45      4469
+
+    accuracy                           0.99    614250
+   macro avg       0.86      0.66      0.72    614250
+weighted avg       0.99      0.99      0.99    614250
+
